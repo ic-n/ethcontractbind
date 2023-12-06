@@ -1,0 +1,105 @@
+version: '3'
+
+vars:
+  IMAGE: ic-n/ethcontractbind
+  TAG:
+    sh: echo $RANDOM | md5 | head -c 20
+
+tasks:
+  build:
+    cmds:
+      - docker build -t {{.IMAGE}}:{{.TAG}} -f ./deploy/contractbind.dockerfile .
+      - helm package deploy
+      - mv contractbind-0.1.0.tgz ./build/contractbind-0.1.0.tgz
+
+  uninstall:
+    cmds:
+      - cmd: helm uninstall contractbind
+        ignore_error: true
+
+  deploy:
+    cmds:
+      - >
+        helm upgrade --install
+        -f deploy/values/default.yaml
+        --set image.repository="{{.IMAGE}}"
+        --set image.tag="{{.TAG}}"
+        contractbind
+        build/contractbind-0.1.0.tgz
+
+  logs:
+    cmds:
+      - kubectl --namespace default get pod {{.POD_NAME}}
+      - kubectl --namespace default describe pod {{.POD_NAME}}
+      - kubectl --namespace default logs {{.POD_NAME}}
+    vars:
+      POD_NAME:
+        sh: kubectl get pods --namespace default -l "app.kubernetes.io/name=contractbind" -o jsonpath="{.items[0].metadata.name}"
+      CONTAINER_PORT:
+        sh: kubectl get pod --namespace default {{.POD_NAME}} -o jsonpath="{.spec.containers[0].ports[0].containerPort}"
+
+  port-forward:
+    cmds:
+      - cmd: echo "Visit http://127.0.0.1:8080 to use your application"
+        silent: true
+      - cmd: kubectl --namespace default port-forward {{.POD_NAME}} 8080:{{.CONTAINER_PORT}}
+    interactive: true
+    vars:
+      POD_NAME:
+        sh: kubectl get pods --namespace default -l "app.kubernetes.io/name=contractbind" -o jsonpath="{.items[0].metadata.name}"
+      CONTAINER_PORT:
+        sh: kubectl get pod --namespace default {{.POD_NAME}} -o jsonpath="{.spec.containers[0].ports[0].containerPort}"
+
+  clean:
+    cmds:
+      - task: uninstall
+      - rm -rf build
+      - rm -rf /tmp/testnet-ethcontractbind
+
+  gen:
+    cmds:
+      - solc --evm-version paris --abi --bin ./contracts/CrowdFund.sol -o build --overwrite
+      - >
+        abigen --out ./pkg/contracts/crowdfund.go
+        --abi ./build/CrowdFund.abi
+        --bin=./build/CrowdFund.bin
+        --pkg contracts
+        --type CrowdFund
+      - task: dev-buf-mod
+      - buf lint proto
+      - buf generate
+      - go mod tidy
+
+  testnet:
+    cmds:
+      - echo -n 1 > /tmp/testnet-ethcontractbind-pw.txt
+      - >
+        geth
+        --verbosity 6
+        --identity "ethcontractbind"
+        --http --http.api web3,eth,debug,personal,net
+        --dev --password /tmp/testnet-ethcontractbind-pw.txt
+        --keystore ./testing/data/keystore
+        --metrics
+        console
+    interactive: true
+
+  local-run:
+    cmds:
+      - >
+        go run cmd/server/main.go
+        -net-url "http://127.0.0.1:8545"
+        -private-key b16ce2c80305a43733733c7057c6515d1c1c34e3cfa71208898dcd1457b84b7e
+        -chain-id 1337
+
+  dev-buf-mod:
+    dir: ./proto
+    cmds:
+      - buf mod update
+
+  dev-mac:
+    cmds:
+      - brew tap ethereum/ethereum
+      - brew install solidity
+      - brew install ethereum
+      - brew install bufbuild/buf/buf
